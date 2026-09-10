@@ -116,8 +116,8 @@ const char *net_error(int ret, int err)
 						|FORMAT_MESSAGE_MAX_WIDTH_MASK,
 						NULL, err,
 						MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+						(LPSTR)msg, sizeof(msg), NULL);
 	snprintf(buffer, sizeof(buffer), "%s (%.480s)", x, msg);
-	snprintf(buffer, sizeof(buffer)-1, "%s (%s)", x, msg);
 #endif
 	return (const char *) buffer;
 }
