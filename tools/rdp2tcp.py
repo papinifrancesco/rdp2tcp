@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import socket
 from random import randint
 from time import sleep
@@ -12,10 +12,10 @@ def connect_to(host, port):
 class R2TException(Exception):
 	pass
 
-server_type_names = {\
-	'ctrl':'controller',\
-	'tun':'tunnel',\
-	'rtun':'tunnel',\
+server_type_names = {
+	'ctrl':'controller',
+	'tun':'tunnel',
+	'rtun':'tunnel',
 	's5':'socks5'
 }
 
@@ -46,8 +46,8 @@ class rdp2tcp:
 	def __init__(self, host, port):
 		try:
 			s = connect_to(host, port)
-		except socket.error, e:
-			raise R2TException(e[1])
+		except socket.error as e:
+			raise R2TException(e.args[1] if len(e.args) > 1 else str(e))
 		self.sock = s
 
 	def close(self):
@@ -56,8 +56,11 @@ class rdp2tcp:
 	def __read_answer(self, end_marker='\n'):
 		data = ''
 		while True:
-			data += self.sock.recv(4096)
-			#print '['+ repr(data) + '] => ' + repr(end_marker)
+			chunk = self.sock.recv(4096)
+			if not chunk:
+				break
+			data += chunk.decode('utf-8', 'replace')
+			#print('['+ repr(data) + '] => ' + repr(end_marker))
 			if end_marker in data:
 				break
 		if data.startswith('error: '):
@@ -68,22 +71,22 @@ class rdp2tcp:
 	def add_tunnel(self, type, src, dst):
 		msg = '%s %s %i %s' % (type, src[0], src[1], dst[0])
 		if type != 'x': msg += ' %i' % dst[1]
-		self.sock.sendall(msg+'\n')
+		self.sock.sendall((msg+'\n').encode())
 		return self.__read_answer()
 
 	def del_tunnel(self, src):
-		self.sock.sendall('- %s %i\n' % src)
+		self.sock.sendall(('- %s %i\n' % src).encode())
 		return self.__read_answer()
 
 	def info(self):
-		self.sock.sendall('l\n')
+		self.sock.sendall('l\n'.encode())
 		return self.__read_answer('\n\n')
 
 if __name__ == '__main__':
 	from sys import argv, exit, stdin, stdout
 
 	def usage():
-		print """
+		print("""
 usage: %s [-h host] [-p port] <cmd> [args..]
 
 commands:
@@ -93,17 +96,17 @@ commands:
    add process <lhost> <lport> <command>
    add socks5  <lhost> <lport>
    del <lhost> <lport>
-   sh [args]""" % argv[0]
+   sh [args]""" % argv[0])
 		exit(0)
 
-	
+
 	def popup_telnet(x, type, dst):
 
 		laddr = ('127.0.0.1', randint(1025, 0xffff))
 		try:
-			print x.add_tunnel(type, laddr, dst)
-		except R2TException, e:
-			print 'error:', e
+			print(x.add_tunnel(type, laddr, dst))
+		except R2TException as e:
+			print('error:', e)
 			return
 
 		try:
@@ -113,9 +116,9 @@ commands:
 			stdout.write('\n')
 
 		try:
-			print x.del_tunnel(laddr)
-		except R2TException, e:
-			print 'error:', e
+			print(x.del_tunnel(laddr))
+		except R2TException as e:
+			print('error:', e)
 
 
 	argc = len(argv)
@@ -123,13 +126,13 @@ commands:
 		usage()
 
 	host,port = '127.0.0.1',8477
-	
+
 	i = 1
-	while argv[i].startswith('-'):
+	while i < argc and argv[i].startswith('-'):
 		if argv[i] == '-h':
-			pass
+			host = argv[i+1]
 		elif argv[i] == '-p':
-			pass
+			port = int(argv[i+1])
 		i += 2
 
 	cmd = argv[i]
@@ -138,10 +141,10 @@ commands:
 
 	try:
 		r2t = rdp2tcp(host, port)
-	except R2TException, e:
-		print 'error: %s' % str(e)
+	except R2TException as e:
+		print('error: %s' % str(e))
 		exit(0)
-	
+
 	argc -= i + 1
 	if cmd == 'add':
 		argc -= 1
@@ -162,20 +165,20 @@ commands:
 			usage()
 
 		try:
-			print r2t.add_tunnel(type, src, dst)
-		except R2TException, e:
-			print 'error: %s' % str(e)
+			print(r2t.add_tunnel(type, src, dst))
+		except R2TException as e:
+			print('error: %s' % str(e))
 
 	elif cmd == 'del':
 		if argc != 2: usage()
 
 		try:
-			print r2t.del_tunnel((argv[i+1], int(argv[i+2])))
-		except R2TException, e:
-			print 'error: %s' % str(e)
+			print(r2t.del_tunnel((argv[i+1], int(argv[i+2]))))
+		except R2TException as e:
+			print('error: %s' % str(e))
 
 	elif cmd == 'info':
-		print r2t.info()
+		print(r2t.info())
 
 	elif cmd == 'sh':
 		proc = 'cmd.exe'
@@ -189,4 +192,3 @@ commands:
 		popup_telnet(r2t, 't', (argv[i+1], int(argv[i+2])))
 
 	r2t.close()
-	
