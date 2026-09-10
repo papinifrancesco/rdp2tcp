@@ -30,7 +30,7 @@
  *  default TS virtual channel name
  */
 #define RDP2TCP_CHAN_NAME "rdp2tcp"
-#define RDP2TCP_PING_DELAY 5 // secs
+#define RDP2TCP_PING_DELAY 30 // secs
 
 // rdp2tcp commands
 #define R2TCMD_CONN  0x00
