@@ -53,6 +53,9 @@
 typedef struct _netsock {
 	struct list_head list;     /**< double-linked list */
 	sock_t sock;               /**< socket (fd on POSIX, SOCKET+event on win32) */
+#ifdef _WIN32
+	long evt_mask;             /**< last WSAEventSelect() filter, 0 if unset */
+#endif
 	unsigned char type;        /**< socket type */
 	unsigned char state;       /**< tunnel state */
 	unsigned char tid;         /**< tunnel identifier */

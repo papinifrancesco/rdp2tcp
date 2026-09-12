@@ -227,6 +227,7 @@ static void mainloop(void)
 	WSANETWORKEVENTS nev;
 	DWORD ret;
 	unsigned int n;
+	long mask;
 	int last_state, state, rd, wr, warned = 0;
 
 	last_state = 0;
@@ -257,7 +258,18 @@ static void mainloop(void)
 				break;
 			}
 
-			WSAEventSelect(ns->sock.fd, ns->sock.evt, netsock_evt_mask(ns));
+			/* Re-arming resets the event and clears the pending event
+			 * record, which would drop a one-shot FD_CLOSE or FD_CONNECT
+			 * that arrived since the last pass (FD_READ would be
+			 * re-signalled, those two would not). So only re-arm when the
+			 * filter actually changed -- the association itself survives
+			 * WSAEnumNetworkEvents(). This mirrors net_update_watch(). */
+			mask = netsock_evt_mask(ns);
+			if (mask != ns->evt_mask) {
+				WSAEventSelect(ns->sock.fd, ns->sock.evt, mask);
+				ns->evt_mask = mask;
+			}
+
 			handles[n++] = (HANDLE) ns->sock.evt;
 		}
 

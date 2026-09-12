@@ -227,23 +227,39 @@ int w32chan_init(void)
 
 void w32chan_kill(void)
 {
+	int rd_done = 1, wr_done = 1;
+
 	InterlockedExchange(&vcp.quit, 1);
+
+	/* Close the pipes first: either thread may be parked inside a blocking
+	 * ReadFile()/WriteFile(), and dropping the handle is what releases it.
+	 * Waiting before this would just burn the timeout. */
+	if (vcp.rd_pipe && (vcp.rd_pipe != INVALID_HANDLE_VALUE)) {
+		CloseHandle(vcp.rd_pipe);
+		vcp.rd_pipe = NULL;
+	}
+
+	if (vcp.wr_pipe && (vcp.wr_pipe != INVALID_HANDLE_VALUE)) {
+		CloseHandle(vcp.wr_pipe);
+		vcp.wr_pipe = NULL;
+	}
 
 	if (vcp.wr_wake)
 		SetEvent(vcp.wr_wake);
 
-	/* the reader thread sits in a blocking ReadFile(); closing the pipe is
-	 * what releases it. Give both a moment, then stop waiting -- we are on
-	 * the way out and the process is about to exit anyway. */
-	if (vcp.wr_thread) {
-		WaitForSingleObject(vcp.wr_thread, 2000);
-		CloseHandle(vcp.wr_thread);
-		vcp.wr_thread = NULL;
-	}
-
+	/* Both threads have to be gone before the locks and buffers they touch
+	 * are torn down -- a writer still failing its WriteFile() would call
+	 * chanbuf_fail() on a critical section we had already deleted. */
 	if (vcp.rd_thread) {
+		rd_done = (WaitForSingleObject(vcp.rd_thread, 2000) == WAIT_OBJECT_0);
 		CloseHandle(vcp.rd_thread);
 		vcp.rd_thread = NULL;
+	}
+
+	if (vcp.wr_thread) {
+		wr_done = (WaitForSingleObject(vcp.wr_thread, 2000) == WAIT_OBJECT_0);
+		CloseHandle(vcp.wr_thread);
+		vcp.wr_thread = NULL;
 	}
 
 	if (vcp.wr_wake) {
@@ -251,8 +267,12 @@ void w32chan_kill(void)
 		vcp.wr_wake = NULL;
 	}
 
-	chanbuf_kill(&vcp.rd);
-	chanbuf_kill(&vcp.wr);
+	/* if a thread somehow outlived its wait, leak rather than free memory it
+	 * may still touch -- we are on our way to exit() anyway */
+	if (rd_done && wr_done) {
+		chanbuf_kill(&vcp.rd);
+		chanbuf_kill(&vcp.wr);
+	}
 }
 
 HANDLE w32chan_read_evt(void)
