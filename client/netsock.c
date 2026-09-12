@@ -121,7 +121,7 @@ netsock_t *netsock_alloc(
 	ns = calloc(1, sizeof(*ns)+extra_size);
 	if (ns) {
 		ns->type = NETSOCK_UNDEF;
-		ns->type = NETSTATE_INIT;
+		ns->state = NETSTATE_INIT;
 		ns->tid  = 0xff;
 		ns->fd = fd;
 		if (addr)
