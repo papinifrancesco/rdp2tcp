@@ -1,0 +1,3 @@
+LIBRARY rdp2tcp_vc.dll
+EXPORTS
+	VirtualChannelEntry
