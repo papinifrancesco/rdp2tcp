@@ -1,0 +1,18 @@
+CC=x86_64-w64-mingw32-gcc
+CFLAGS=-Wall -g -D_WIN32_WINNT=0x0600
+LDFLAGS=-lws2_32
+
+BINS=w32_client_harness.exe w32_mstsc_mock.exe
+
+all: $(BINS)
+
+%.exe: %.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+# the harnesses need the artifacts they exercise
+check: $(BINS)
+	./w32_client_harness.exe ../client/rdp2tcp.exe
+	RDP2TCP_EXE=../client/rdp2tcp.exe ./w32_mstsc_mock.exe ../plugin/rdp2tcp_vc.dll
+
+clean:
+	rm -f $(BINS)
