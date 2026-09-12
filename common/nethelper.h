@@ -42,8 +42,9 @@
 typedef int sock_t;
 #define net_init()   ((void)0)
 #define net_exit()   ((void)0)
-#define net_close(x) close(x)
+#define net_close(s) close(*(s))
 #define net_pending() ((errno == EINPROGRESS) || (errno == EAGAIN))
+#define net_lasterror() errno
 #define valid_sock(s) ((s) && (*(s) != -1))
 
 #else
@@ -59,6 +60,7 @@ void net_init(void);
 #define net_exit()    WSACleanup()
 void net_close(sock_t *);
 #define net_pending() (WSAGetLastError() == WSAEWOULDBLOCK)
+#define net_lasterror() WSAGetLastError()
 #define valid_sock(s) ((s) && ((s)->fd != INVALID_SOCKET) \
 								&& ((s)->evt != WSA_INVALID_EVENT))
 
@@ -84,6 +86,7 @@ int netaddr_cmp(const netaddr_t *, const netaddr_t *);
 const char *netaddr_print(const netaddr_t *, char *);
 
 const char *net_error(int, int);
+const char *net_syserror(int);
 
 int net_resolve(int, const char *, unsigned short, netaddr_t *, int *);
 int net_server(int, const char *, unsigned short, sock_t *, netaddr_t *,int*);

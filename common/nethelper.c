@@ -86,13 +86,35 @@ int net_update_watch(sock_t *s, iobuf_t *obuf)
  * @return the error description
  * @note the returned string is hold in a static buffer
  */
+/**
+ * describe a system-level error
+ * @param[in] err errno on POSIX, a winsock/win32 error code on windows
+ * @return the error description
+ * @note the returned string is hold in a static buffer
+ */
+const char *net_syserror(int err)
+{
+	static char msg[512];
+
+#ifndef _WIN32
+	snprintf(msg, sizeof(msg), "%s", strerror(err));
+#else
+	msg[0] = 0;
+	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM
+						|FORMAT_MESSAGE_IGNORE_INSERTS
+						|FORMAT_MESSAGE_MAX_WIDTH_MASK,
+						NULL, err,
+						MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+						(LPSTR)msg, sizeof(msg), NULL);
+#endif
+
+	return (const char *) msg;
+}
+
 const char *net_error(int ret, int err)
 {
 	const char *x;
 	static char buffer[512];
-#ifdef _WIN32
-	static char msg[512];
-#endif
 	static const char *actions_errors[] = {
 		"failed to resolve hostname", 
 		"no valid address", 
@@ -107,18 +129,12 @@ const char *net_error(int ret, int err)
 	x = ((ret >= NETERR_SEND) && (ret < 0)) ? actions_errors[-ret-1] : "???";
 	
 #ifndef _WIN32
-	snprintf(buffer, sizeof(buffer)-1, "%s (%s)", x,
-				(ret == NETERR_RESOLVE ? gai_strerror(err) : strerror(err)));
-#else
-	msg[0] = 0;
-	FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM
-						|FORMAT_MESSAGE_IGNORE_INSERTS
-						|FORMAT_MESSAGE_MAX_WIDTH_MASK,
-						NULL, err,
-						MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-						(LPSTR)msg, sizeof(msg), NULL);
-	snprintf(buffer, sizeof(buffer), "%s (%.480s)", x, msg);
+	if (ret == NETERR_RESOLVE)
+		snprintf(buffer, sizeof(buffer)-1, "%s (%s)", x, gai_strerror(err));
+	else
 #endif
+		snprintf(buffer, sizeof(buffer), "%s (%.480s)", x, net_syserror(err));
+
 	return (const char *) buffer;
 }
 
