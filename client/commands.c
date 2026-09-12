@@ -23,7 +23,9 @@
 #include "r2tcli.h"
 #include "msgparser.h"
 
+#ifndef _WIN32
 #include <arpa/inet.h>
+#endif
 
 extern const char *r2t_errors[R2TERR_MAX];
 

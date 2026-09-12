@@ -25,9 +25,11 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
 #include <errno.h>
+#ifndef _WIN32
+#include <fcntl.h>
 #include <arpa/inet.h>
+#endif
 
 /**
  * all network sockets double-linked list
@@ -81,8 +83,8 @@ void netsock_close(netsock_t *ns)
 
 	list_del(&ns->list);
 
-	if (ns->type != NETSOCK_RTUNSRV)
-		close(ns->fd);
+	if (!netsock_is_sockless(ns))
+		net_close(&ns->sock);
 
 	switch (ns->type) {
 
@@ -105,14 +107,14 @@ void netsock_close(netsock_t *ns)
 /**
  * allocate a netsock_t structure
  * @param[in] cli caller socket
- * @param[in] fd socket
+ * @param[in] sock socket, or NULL for a sockless entry
  * @param[in] addr associated socket address
  * @param[in] extra_size extra padding allocated for structure
  * @return allocated structure
  */
 netsock_t *netsock_alloc(
 					netsock_t *cli,
-					int fd,
+					sock_t *sock,
 					netaddr_t *addr,
 					unsigned int extra_size)
 {
@@ -123,7 +125,10 @@ netsock_t *netsock_alloc(
 		ns->type = NETSOCK_UNDEF;
 		ns->state = NETSTATE_INIT;
 		ns->tid  = 0xff;
-		ns->fd = fd;
+		if (sock)
+			ns->sock = *sock;
+		else
+			netsock_invalidate(ns); /* sockless, ie. NETSOCK_RTUNSRV */
 		if (addr)
 			memcpy(&ns->addr, addr, sizeof(*addr));
 		list_add_tail(&ns->list, &all_sockets);
@@ -131,7 +136,8 @@ netsock_t *netsock_alloc(
 		error("failed to allocated socket structure");
 		if (cli)
 			controller_answer(cli, "failed to allocated socket structure");
-		close(fd);
+		if (sock)
+			net_close(sock);
 	}
 
 	return ns;
@@ -152,12 +158,13 @@ netsock_t *netsock_bind(
 		unsigned int extra_size)
 {
 	netsock_t *srv;
-	int ret, err, fd;
+	int ret, err;
+	sock_t sock;
 	netaddr_t addr;
 
 	assert((!cli || valid_netsock(cli)) && host && *host && port);
 
-	ret = net_server(AF_UNSPEC, host, port, &fd, &addr, &err);
+	ret = net_server(AF_UNSPEC, host, port, &sock, &addr, &err);
 	if (ret < 0) {
 		error("%s", net_error(ret, err));
 		if (cli)
@@ -165,7 +172,7 @@ netsock_t *netsock_bind(
 		return NULL;
 	}
 
-	srv = netsock_alloc(NULL, fd, &addr, extra_size);
+	srv = netsock_alloc(NULL, &sock, &addr, extra_size);
 	if (srv)
 		srv->state = NETSTATE_CONNECTED;
 
@@ -180,18 +187,19 @@ netsock_t *netsock_bind(
 netsock_t *netsock_accept(netsock_t *srv)
 {
 	netsock_t *cli;
-	int ret, fd;
+	int ret;
+	sock_t sock;
 	netaddr_t addr;
 
 	assert(valid_netsock(srv));
 
-	ret = net_accept(&srv->fd, &fd, &addr);
+	ret = net_accept(&srv->sock, &sock, &addr);
 	if (ret) {
-		error("failed to accept connection (%s)", strerror(ret));
+		error("failed to accept connection (%s)", net_syserror(ret));
 		return NULL;
 	}
 
-	cli = netsock_alloc(NULL, fd, &addr, 0);
+	cli = netsock_alloc(NULL, &sock, &addr, 0);
 	if (cli)
 		cli->state = NETSTATE_CONNECTED;
 
@@ -207,19 +215,20 @@ netsock_t *netsock_accept(netsock_t *srv)
 netsock_t *netsock_connect(const char *host, unsigned short port)
 {
 	netsock_t *cli;
-	int ret, err, fd;
+	int ret, err;
+	sock_t sock;
 	netaddr_t addr;
 
 	assert(host && *host && port);
 
-	ret = net_client(AF_UNSPEC, host, port, &fd, &addr, &err);
+	ret = net_client(AF_UNSPEC, host, port, &sock, &addr, &err);
 	if (ret < 0) {
 		error("failed to connect to %s:%hu (%s)",
 				host, port, net_error(ret, err));
 		return NULL;
 	}
 
-	cli = netsock_alloc(NULL, fd, &addr, 0);
+	cli = netsock_alloc(NULL, &sock, &addr, 0);
 	if (cli)
 		cli->state = (ret ? NETSTATE_CONNECTING : NETSTATE_CONNECTED);
 
@@ -246,13 +255,16 @@ int netsock_read(
 
 	assert(valid_netsock(ns) && ibuf);
 
-	ret = net_read(&ns->fd, ibuf, prefix_size, &ns->min_io_size, &r);
+	ret = net_read(&ns->sock, ibuf, prefix_size, &ns->min_io_size, &r);
 	if (ret < 0) {
+		/* net_read() returns the negated error code: capture it before
+		 * netaddr_print(), which clears it on win32 (WSAAddressToString) */
+		int err = -ret;
 		netaddr_print(&ns->addr, host);
 		if (ret == NETERR_CLOSED)
 			info(0, "connection %s closed", host);
 		else
-			error("failed to recv data from %s (%s)", host, strerror(errno));
+			error("failed to recv data from %s (%s)", host, net_syserror(err));
 
 	} else if (r > 0) {
 		if (out_size)
@@ -278,13 +290,14 @@ int netsock_write(netsock_t *ns, const void *buf, unsigned int len)
 
 	assert(valid_netsock(ns) && (buf || !len));
 
-	ret = net_write(&ns->fd, &ns->u.tuncli.obuf, buf, len, &w);
+	ret = net_write(&ns->sock, &ns->u.tuncli.obuf, buf, len, &w);
 	if (ret < 0) {
+		int err = -ret; /* see netsock_read() */
 		netaddr_print(&ns->addr, host);
 		if (ret == NETERR_CLOSED)
 			info(0, "connection %s closed", host);
 		else
-			error("failed to send data to %s (%s)", host, strerror(errno));
+			error("failed to send data to %s (%s)", host, net_syserror(err));
 
 	} else if (w > 0) {
 		print_xfer("tcp", 'w', w);

@@ -26,11 +26,17 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef _WIN32
 #include <arpa/inet.h>
+#endif
 
+#include <stdint.h>
+
+/* uintptr_t rather than unsigned long: under LLP64 (win64) long is 32-bit
+ * while pointers are 64-bit, which would truncate the difference */
 #ifndef PTR_DIFF
 #define PTR_DIFF(e,s) \
-	        ((unsigned int)(((unsigned long)(e))-((unsigned long)(s))))
+	        ((unsigned int)((uintptr_t)(e) - (uintptr_t)(s)))
 #endif
 
 /**

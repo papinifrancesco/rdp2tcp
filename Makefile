@@ -1,4 +1,4 @@
-.PHONY: all client server-mingw32 clean
+.PHONY: all client client-mingw32 server-mingw32 clean
 
 all: client
 
@@ -7,10 +7,14 @@ all: client
 client:
 	$(MAKE) -C client
 
+client-mingw32:
+	$(MAKE) -C client -f Makefile.mingw32
+
 server-mingw32:
 	$(MAKE) -C server -f Makefile.mingw32
 
 clean:
 	$(MAKE) -C client clean
+	$(MAKE) -C client -f Makefile.mingw32 clean
 	$(MAKE) -C server -f Makefile.mingw32 clean
 	$(MAKE) -C tools clean

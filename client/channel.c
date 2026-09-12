@@ -23,11 +23,15 @@
 #include "r2tcli.h"
 #include "msgparser.h"
 
+#include "w32chan.h"
+
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
 #include <arpa/inet.h>
+#endif
 
 extern int debug_level;
 
@@ -52,6 +56,11 @@ int channel_init(void)
 	vc.last_state = -1;
 	iobuf_init2(&vc.ibuf, &vc.obuf, "chan");
 
+#ifdef _WIN32
+	if (w32chan_init())
+		return -1;
+#endif
+
 	return 0;
 }
 
@@ -61,6 +70,10 @@ int channel_init(void)
 void channel_kill(void)
 {
 	trace_chan("");
+
+#ifdef _WIN32
+	w32chan_kill();
+#endif
 
 	iobuf_kill2(&vc.ibuf, &vc.obuf);
 }
@@ -99,6 +112,12 @@ int channel_read_event(void)
 	
 	//trace_chan("");
 
+#ifdef _WIN32
+	/* the reader thread already did the blocking pipe I/O for us */
+	r = w32chan_read(&msglen, 4);
+	if (r < 0)
+		goto chan_read_err;
+#else
 	ptr = (char *)&msglen;
 	avail = 4;
 	do {
@@ -108,12 +127,28 @@ int channel_read_event(void)
 		ptr += r;
 		avail -= r;
 	} while (avail > 0);
+#endif
 
 	ptr = iobuf_reserve(&vc.ibuf, msglen, &avail);
 	if (!ptr)
 		return error("failed to reserve channel memory");
 
   avail = msglen;
+#ifdef _WIN32
+	r = w32chan_read(ptr, msglen);
+	if (r < 0)
+		goto chan_read_err;
+
+#ifdef DEBUG
+	if (debug_level > 2) {
+		fputs("[in] ", stderr);
+		fprint_hex(ptr, r, stderr);
+		fputc('\n', stderr);
+	}
+#endif
+
+	print_xfer("chan", 'r', (unsigned int)r);
+#else
 	do {
 		r = read(RDP_FD_IN, ptr, avail);
 		//trace_chan("r=%u/%u", r, avail);
@@ -127,12 +162,13 @@ int channel_read_event(void)
 			fputc('\n', stderr);
 		}
 #endif
-		
+
 		print_xfer("chan", 'r', (unsigned int)r);
 
 		ptr += r;
 		avail -= r;
 	} while (avail > 0);
+#endif
 
 	iobuf_commit(&vc.ibuf, msglen);
 	commands_parse(&vc.ibuf);
@@ -141,11 +177,15 @@ int channel_read_event(void)
 	return 0;
 
 chan_read_err:
+#ifdef _WIN32
+	error("channel pipe closed");
+#else
 	if (r < 0)
 		error("failed to read from channel pipe (%s)", strerror(errno));
 	else if (r == 0)
 		error("channel closed");
-	return -1;	
+#endif
+	return -1;
 }
 
 /**
@@ -164,28 +204,62 @@ int channel_want_write(void)
  */
 void channel_write_event(void)
 {
-	int ret, fd;
 	unsigned int w;
+#ifndef _WIN32
+	int ret, fd;
+#endif
 
 	trace_chan("");
 #ifdef DEBUG
 	if (debug_level > 2) iobuf_dump(&vc.obuf);
 #endif
 
+#ifdef _WIN32
+	/* handing the bytes to the writer thread never blocks, so the whole
+	 * buffer goes at once; back-pressure is applied by the main loop, which
+	 * stops calling us while w32chan_write_evt() is clear */
+	w = iobuf_datalen(&vc.obuf);
+	if (!w)
+		return;
+
+	if (w32chan_write(iobuf_dataptr(&vc.obuf), w)) {
+		error("failed to queue data on the RDP client pipe");
+		bye();
+		return;
+	}
+
+	iobuf_consume(&vc.obuf, w);
+	print_xfer("chan", 'w', w);
+#else
 	fd = RDP_FD_OUT;
 	ret = net_write(&fd, &vc.obuf, NULL, 0, &w);
 	if (ret >= 0) {
 		if (w > 0)
 			print_xfer("chan", 'w', (unsigned int) w);
 
-	} else { 
-		if (ret == NETERR_CLOSED) 
+	} else {
+		if (ret == NETERR_CLOSED)
 			error("rdesktop pipe closed");
 		else
 			error("failed to write to rdesktop pipe (%s)", strerror(errno));
 		bye();
 	}
+#endif
 }
+
+#ifdef _WIN32
+/** virtual channel read-event, for the main loop wait set */
+HANDLE channel_read_evt(void)
+{
+	return w32chan_read_evt();
+}
+
+/** virtual channel write-readiness event, for the main loop wait set */
+HANDLE channel_write_evt(void)
+{
+	return w32chan_write_evt();
+}
+#endif
 
 /**
  * reserve memory into virtual channel ouput buffer

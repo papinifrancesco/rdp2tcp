@@ -27,7 +27,9 @@
 #include "nethelper.h"
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/socket.h>
+#endif
 
 // netsock.c
 #define NETSOCK_CTRLSRV 0
@@ -50,7 +52,7 @@
 /** network socket (tunnel, client or server) */
 typedef struct _netsock {
 	struct list_head list;     /**< double-linked list */
-	int fd;                    /**< socket descriptor */
+	sock_t sock;               /**< socket (fd on POSIX, SOCKET+event on win32) */
 	unsigned char type;        /**< socket type */
 	unsigned char state;       /**< tunnel state */
 	unsigned char tid;         /**< tunnel identifier */
@@ -85,13 +87,28 @@ typedef struct _netsock {
 	} u;
 } netsock_t;
 
+/**
+ * reverse-tunnel server entries are bookkeeping only: they never own a
+ * socket, so every socket-validity test has to make an exception for them.
+ */
+#define netsock_is_sockless(ns) ((ns)->type == NETSOCK_RTUNSRV)
+
+#ifdef _WIN32
+#define netsock_invalidate(ns) do { \
+				(ns)->sock.fd  = INVALID_SOCKET; \
+				(ns)->sock.evt = WSA_INVALID_EVENT; \
+			} while (0)
+#else
+#define netsock_invalidate(ns) do { (ns)->sock = -1; } while (0)
+#endif
+
 #define valid_netsock(ns) \
 				((ns) && (ns)->list.next && (ns)->list.prev \
-				 && (((ns)->fd != -1) || ((ns)->type == NETSOCK_RTUNSRV)) \
+				 && (valid_sock(&(ns)->sock) || netsock_is_sockless(ns)) \
 				 && ((ns)->type <= NETSOCK_RTUNCLI) \
 				 && (((ns)->addr.ip4.sin_family == AF_INET) \
 					 || ((ns)->addr.ip4.sin_family == AF_INET6) \
-					 || ((ns)->type == NETSOCK_RTUNSRV)))
+					 || netsock_is_sockless(ns)))
 
 #define netsock_is_server(ns) ((ns)->type <= NETSOCK_S5SRV)
 
@@ -101,7 +118,7 @@ typedef struct _netsock {
  */
 #define netsock_want_read(ns) ((ns)->state >= NETSTATE_CONNECTED)
 
-netsock_t *netsock_alloc(netsock_t *, int, netaddr_t *, unsigned int);
+netsock_t *netsock_alloc(netsock_t *, sock_t *, netaddr_t *, unsigned int);
 netsock_t *netsock_bind(netsock_t *, const char*,unsigned short,unsigned int);
 netsock_t *netsock_accept(netsock_t *);
 netsock_t *netsock_connect(const char *, unsigned short);
@@ -114,6 +131,18 @@ void netsock_close(netsock_t *);
 // channel.c
 #define RDP_FD_IN  0
 #define RDP_FD_OUT 1
+
+#ifdef _WIN32
+/**
+ * The RDP client pipes the virtual channel over our stdin/stdout. FreeRDP
+ * creates those with CreatePipe(), and anonymous pipes support neither
+ * overlapped I/O nor waiting, so channel.c bridges them with blocking
+ * reader/writer threads which signal these events instead. The main loop
+ * waits on them exactly like the server waits on its channel events.
+ */
+HANDLE channel_read_evt(void);
+HANDLE channel_write_evt(void);
+#endif
 
 int  channel_init(void);
 void channel_kill(void);
