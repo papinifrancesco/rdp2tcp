@@ -19,7 +19,9 @@ OBJS=	../common/iobuf.o \
 	main.o netsock.o tunnel.o channel.o w32chan.o \
 	commands.o controller.o socks5.o
 
-all: clean_common $(BIN)
+# clean first: the POSIX and mingw builds share .o names in this directory,
+# so a stale object from the other toolchain would otherwise be linked in
+all: clean clean_common $(BIN)
 
 clean_common:
 	$(MAKE) -C ../common clean
