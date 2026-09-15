@@ -55,6 +55,7 @@ typedef struct _netsock {
 	sock_t sock;               /**< socket (fd on POSIX, SOCKET+event on win32) */
 #ifdef _WIN32
 	long evt_mask;             /**< last WSAEventSelect() filter, 0 if unset */
+	unsigned char peer_closed; /**< FD_CLOSE seen; sticky, unlike the event */
 #endif
 	unsigned char type;        /**< socket type */
 	unsigned char state;       /**< tunnel state */

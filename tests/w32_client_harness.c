@@ -21,8 +21,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#define R2TCMD_CONN 0x00
-#define R2TCMD_DATA 0x02
+#define R2TCMD_CONN  0x00
+#define R2TCMD_CLOSE 0x01
+#define R2TCMD_DATA  0x02
 #define R2TCMD_PING 0x03
 #define TUNAF_IPV4  0x01
 
@@ -283,6 +284,52 @@ int main(int argc, char **argv)
 
 	closesocket(t);
 
+	/* --- 7b. peer closes before the tunnel is up --------------------
+	 * Regression for a leak found in the first live mstsc test: FD_CLOSE
+	 * is one-shot, and if it arrives while the tunnel is still waiting
+	 * for the connect answer, an edge-triggered loop loses it and the
+	 * tunnel (and the remote process) live forever. */
+	{
+		SOCKET t2 = tcp_connect(TUN_PORT);
+		unsigned char tid2;
+		int saw_close = 0, tries;
+
+		if (t2 == INVALID_SOCKET) { fail("second tunnel connect"); goto shutdown; }
+
+		/* the first tunnel's R2TCMD_CLOSE may still be in flight: skip past
+		 * it to the CONN for this one */
+		for (tries = 0; tries < 3; ++tries) {
+			n = read_frame(frame, sizeof(frame), 3000);
+			if ((n >= 8) && (frame[0] == R2TCMD_CONN)) break;
+		}
+		if (tries == 3) { fail("second R2TCMD_CONN"); goto shutdown; }
+		tid2 = frame[1];
+
+		/* data + EOF while the server has not answered yet */
+		send(t2, "early", 5, 0);
+		shutdown(t2, SD_SEND);
+		Sleep(300);
+
+		/* now the server answers: the tunnel comes up with a dead peer */
+		if (send_msg(R2TCMD_CONN, tid2, connans, sizeof(connans)))
+			fail("writing the second connect answer");
+
+		for (tries = 0; tries < 3 && !saw_close; ++tries) {
+			n = read_frame(frame, sizeof(frame), 3000);
+			if (n < 0) break;
+			if ((frame[0] == R2TCMD_CLOSE) && (frame[1] == tid2))
+				saw_close = 1;
+		}
+
+		if (saw_close)
+			ok("EOF received before the connect answer still closes tunnel 0x%02x", tid2);
+		else
+			fail("tunnel 0x%02x leaked: peer EOF before the connect answer was lost", tid2);
+
+		closesocket(t2);
+	}
+
+shutdown:
 	/* --- 8. the RDP client going away ------------------------------ */
 	CloseHandle(child_in_w);
 	CloseHandle(child_out_r);

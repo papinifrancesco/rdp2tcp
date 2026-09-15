@@ -312,7 +312,21 @@ static void mainloop(void)
 			if (WSAEnumNetworkEvents(ns->sock.fd, ns->sock.evt, &nev))
 				continue;
 
-			rd = (nev.lNetworkEvents & (FD_READ|FD_ACCEPT|FD_CLOSE)) != 0;
+			/* FD_CLOSE fires exactly once. If it lands while the socket is
+			 * not yet allowed to read (a tunnel still CONNECTING, waiting
+			 * for the server's answer) and we consumed it here, nothing
+			 * would ever re-signal the EOF and the tunnel would leak with
+			 * its remote end alive. So remember it, and keep the socket
+			 * readable until recv() reports the close itself -- which is
+			 * the level-triggered behaviour select() gives the POSIX build
+			 * for free. Reading is gated on netsock_want_read() for the
+			 * same reason: select() never polled a CONNECTING socket, so
+			 * data must not be forwarded before the tunnel is up. */
+			if (nev.lNetworkEvents & FD_CLOSE)
+				ns->peer_closed = 1;
+
+			rd = ((nev.lNetworkEvents & (FD_READ|FD_ACCEPT)) || ns->peer_closed)
+				  && netsock_want_read(ns);
 			wr = (nev.lNetworkEvents & (FD_WRITE|FD_CONNECT)) != 0;
 
 			if ((rd || wr) && (netsock_dispatch(ns, rd, wr) < 0))
