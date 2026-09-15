@@ -146,6 +146,21 @@ int main(int argc, char **argv)
 		}
 
 		channel_kill();
+
+		/* Every tunnel still open at this point -- its socket or spawned
+		 * process, its pipe handles, its event-array slots -- belongs to
+		 * the connection that just died. channel_init() on the next pass
+		 * calls events_init(), which resets events_count back to 2 and so
+		 * forgets where those slots were, but does nothing to actually
+		 * close them: they'd survive as untracked state, with nothing
+		 * left driving their I/O. Found live: a channel bounce under load
+		 * followed several minutes later by "GetOverlappedResult: the
+		 * handle is invalid" and a permanent freeze, consistent with
+		 * exactly this. tunnels_kill() already does the right cleanup --
+		 * bye() uses it on exit -- it just also belongs here, on every
+		 * reconnect, not only on the last one. */
+		tunnels_kill();
+
 		Sleep(1000);
 
 	} while (1);
