@@ -25,6 +25,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "debug.h"
 #include "print.h"
@@ -38,7 +39,45 @@
 int info_level = 3;
 static FILE *print_fps[PRINT_MAX];
 
+/**
+ * optional duplicate of every info/warn/error/debug line, timestamped, to a
+ * plain file -- set RDP2TCP_LOGFILE to a path before launching the client
+ * or the server. Console output (print_fps[]) is unaffected either way.
+ * Exists for the server, which has no equivalent of the client's plugin
+ * redirecting its stderr: whatever console window it was launched from is
+ * the only record, gone the moment that window scrolls or closes. A file
+ * survives, and the timestamp is what makes a freeze like "it worked for a
+ * while, then stopped" provable after the fact instead of guessed at.
+ */
+static FILE *log_fp = NULL;
+
 /* common code {{{  */
+
+/** write one already-formatted line to the log file, if one is open */
+static void log_line(const char *prefix, const char *fmt, va_list va)
+{
+	time_t now;
+	struct tm *lt;
+	char ts[16];
+
+	if (!log_fp)
+		return;
+
+	time(&now);
+	lt = localtime(&now);
+	if (lt)
+		strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+	else
+		snprintf(ts, sizeof(ts), "??:??:??");
+
+	fprintf(log_fp, "%s ", ts);
+	if (prefix)
+		fputs(prefix, log_fp);
+	vfprintf(log_fp, fmt, va);
+	fputc('\n', log_fp);
+	fflush(log_fp); /* a freeze leaves nothing buffered unwritten */
+}
+
 static void do_print(
 					unsigned int fid,
 					const char *prefix,
@@ -46,8 +85,15 @@ static void do_print(
 					va_list va)
 {
 	FILE *fp;
+	va_list vc;
 
 	assert(print_fps[fid] && fmt);
+
+	if (log_fp) {
+		va_copy(vc, va);
+		log_line(prefix, fmt, vc);
+		va_end(vc);
+	}
 
 	fp = print_fps[fid];
 	if (prefix)
@@ -91,6 +137,8 @@ void __trace(
 /* info/warn/error API {{{ */
 void print_init(void)
 {
+	const char *path;
+
 #ifdef DEBUG
 	char *val;
 
@@ -105,6 +153,13 @@ void print_init(void)
 	print_fps[0] = stderr;
 	print_fps[1] = stderr;
 	print_fps[2] = stderr;
+
+	path = getenv("RDP2TCP_LOGFILE");
+	if (path && *path) {
+		log_fp = fopen(path, "a");
+		if (!log_fp)
+			fprintf(stderr, "warning: failed to open RDP2TCP_LOGFILE '%s'\n", path);
+	}
 }
 
 /**
