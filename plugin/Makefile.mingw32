@@ -1,7 +1,7 @@
 BIN=rdp2tcp_vc.dll
 CC=x86_64-w64-mingw32-gcc
 CFLAGS=-Wall -g -D_WIN32_WINNT=0x0600
-LDFLAGS=-shared -static-libgcc
+LDFLAGS=-shared -static-libgcc -ladvapi32
 OBJS=rdp2tcp_vc.o
 
 all: clean $(BIN)

@@ -38,6 +38,15 @@ To remove it:
 | --- | --- |
 | `RDP2TCP_EXE` | Full path to the client helper, overriding the default of `rdp2tcp.exe` beside the DLL. |
 
+And one optional registry value under the same `AddIns\rdp2tcp` key:
+
+| Value | Effect |
+| --- | --- |
+| `LogFile` (REG_SZ) | Append the helper's stderr to this file instead of discarding it, and set `DEBUG=1` for it. This is the way to see what `rdp2tcp.exe` is doing under mstsc. |
+
+    reg add "HKCU\Software\Microsoft\Terminal Server Client\Default\AddIns\rdp2tcp" ^
+        /v LogFile /t REG_SZ /d "C:\path\to\rdp2tcp.log" /f
+
 The controller still listens on `127.0.0.1:8477`, so `tools/rdp2tcp.py`
 works unchanged.
 

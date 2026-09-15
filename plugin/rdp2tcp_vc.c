@@ -120,6 +120,50 @@ static int helper_cmdline(char *out, unsigned int outsz)
 	return 0;
 }
 
+#define R2T_ADDIN_KEY \
+	"Software\\Microsoft\\Terminal Server Client\\Default\\AddIns\\rdp2tcp"
+
+/**
+ * where to send the helper's stderr. mstsc gives it no console, so by
+ * default it goes to NUL; an optional LogFile value under our AddIns key
+ * points it at a file instead, and turns the helper's debug output on.
+ *
+ * @return an inheritable handle, INVALID_HANDLE_VALUE if none could be made
+ */
+static HANDLE helper_stderr(SECURITY_ATTRIBUTES *sa)
+{
+	char path[MAX_PATH];
+	DWORD len = sizeof(path), type = 0;
+	HKEY key;
+	HANDLE h;
+	LONG rc;
+
+	rc = RegOpenKeyExA(HKEY_CURRENT_USER, R2T_ADDIN_KEY, 0, KEY_READ, &key);
+	if (rc == ERROR_SUCCESS) {
+		rc = RegQueryValueExA(key, "LogFile", NULL, &type, (LPBYTE)path, &len);
+		RegCloseKey(key);
+	}
+
+	if ((rc == ERROR_SUCCESS) && (type == REG_SZ) && len && path[0]) {
+		path[sizeof(path)-1] = 0;
+		h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE,
+							 sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (h != INVALID_HANDLE_VALUE) {
+			/* the child inherits our environment; these are read by
+			 * print_init() in the helper (DEBUG only has effect in a -DDEBUG
+			 * build, and is harmless otherwise) */
+			SetEnvironmentVariableA("DEBUG", "1");
+			vclog("helper stderr -> %s", path);
+			return h;
+		}
+		vclog("cannot open LogFile %s (%lu), falling back to NUL",
+				path, GetLastError());
+	}
+
+	return CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE,
+							  sa, OPEN_EXISTING, 0, NULL);
+}
+
 /** pump the child's stdout into the virtual channel */
 static DWORD WINAPI copy_thread(LPVOID unused)
 {
@@ -191,9 +235,8 @@ static int start_helper(void)
 	SetHandleInformation(vc.child_stdin_w, HANDLE_FLAG_INHERIT, 0);
 
 	/* STARTF_USESTDHANDLES wants three real handles, and mstsc has no
-	 * console to inherit one from, so the helper's diagnostics go to NUL */
-	nul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE,
-							&sa, OPEN_EXISTING, 0, NULL);
+	 * console to inherit one from: NUL, or the LogFile if configured */
+	nul = helper_stderr(&sa);
 
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si);
