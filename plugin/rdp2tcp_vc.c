@@ -61,16 +61,71 @@ static struct {
 	PROCESS_INFORMATION pi;
 
 	HANDLE copy_thread;
+	HANDLE heartbeat_thread;
 	HANDLE write_complete;
 
 	volatile LONG running;
+
+	/* traffic counters, reset per session, for the heartbeat below --
+	 * added to see, without editing code again, which direction of a
+	 * live session goes quiet: mstsc failing to deliver
+	 * CHANNEL_EVENT_DATA_RECEIVED reads as rx stalling while tx keeps
+	 * moving; a copy_thread stuck in ReadFile on the child's stdout reads
+	 * as tx stalling while rx keeps moving. */
+	volatile LONG rx_events, rx_bytes, tx_events, tx_bytes;
 } vc;
 
-/** diagnostics: visible in DebugView, mstsc gives us no console */
+#define R2T_ADDIN_KEY \
+	"Software\\Microsoft\\Terminal Server Client\\Default\\AddIns\\rdp2tcp"
+
+/**
+ * the optional LogFile value under our AddIns key. Resolved once and
+ * cached: every vclog() call and the helper's own stderr redirection share
+ * this path, so there is exactly one registry read per session.
+ *
+ * @return the path, or NULL if no LogFile is configured
+ */
+static const char *plugin_log_path(void)
+{
+	static char path[MAX_PATH];
+	static volatile LONG resolved = 0;
+	HKEY key;
+	DWORD len, type;
+	LONG rc;
+
+	if (InterlockedCompareExchange(&resolved, 1, 0) == 0) {
+		path[0] = 0;
+		rc = RegOpenKeyExA(HKEY_CURRENT_USER, R2T_ADDIN_KEY, 0, KEY_READ, &key);
+		if (rc == ERROR_SUCCESS) {
+			len = sizeof(path);
+			rc = RegQueryValueExA(key, "LogFile", NULL, &type, (LPBYTE)path, &len);
+			RegCloseKey(key);
+			if ((rc != ERROR_SUCCESS) || (type != REG_SZ))
+				path[0] = 0;
+			else
+				path[sizeof(path)-1] = 0;
+		}
+	}
+
+	return path[0] ? path : NULL;
+}
+
+/**
+ * diagnostics. mstsc gives the plugin no console, and this runs in a
+ * sandboxed environment where OutputDebugString capture (DebugView or
+ * dbgviewcli, with or without elevation) could not even initialize -- so
+ * this writes to the same LogFile the helper's stderr uses instead of
+ * relying on a capture driver at all. OutputDebugString is still emitted
+ * too; it costs nothing and helps on a host where it does work.
+ */
 static void vclog(const char *fmt, ...)
 {
-	char buf[512];
+	char buf[512], line[600];
 	va_list ap;
+	const char *path;
+	SYSTEMTIME t;
+	HANDLE h;
+	DWORD w, n;
 
 	va_start(ap, fmt);
 	_vsnprintf(buf, sizeof(buf)-1, fmt, ap);
@@ -80,6 +135,27 @@ static void vclog(const char *fmt, ...)
 	OutputDebugStringA("[rdp2tcp] ");
 	OutputDebugStringA(buf);
 	OutputDebugStringA("\n");
+
+	path = plugin_log_path();
+	if (!path)
+		return;
+
+	h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE,
+						  NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE)
+		return;
+
+	GetLocalTime(&t);
+	n = (DWORD) _snprintf(line, sizeof(line)-2,
+								 "%02u:%02u:%02u.%03u [plugin] %s",
+								 t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, buf);
+	if ((int)n < 0)
+		n = sizeof(line) - 3;
+	line[n++] = '\r';
+	line[n++] = '\n';
+
+	WriteFile(h, line, n, &w, NULL);
+	CloseHandle(h);
 }
 
 /**
@@ -120,32 +196,20 @@ static int helper_cmdline(char *out, unsigned int outsz)
 	return 0;
 }
 
-#define R2T_ADDIN_KEY \
-	"Software\\Microsoft\\Terminal Server Client\\Default\\AddIns\\rdp2tcp"
-
 /**
  * where to send the helper's stderr. mstsc gives it no console, so by
- * default it goes to NUL; an optional LogFile value under our AddIns key
- * points it at a file instead, and turns the helper's debug output on.
+ * default it goes to NUL; the LogFile from plugin_log_path(), if any,
+ * points it at a file instead and turns the helper's debug output on --
+ * landing in the same file the plugin's own vclog() writes to.
  *
  * @return an inheritable handle, INVALID_HANDLE_VALUE if none could be made
  */
 static HANDLE helper_stderr(SECURITY_ATTRIBUTES *sa)
 {
-	char path[MAX_PATH];
-	DWORD len = sizeof(path), type = 0;
-	HKEY key;
+	const char *path = plugin_log_path();
 	HANDLE h;
-	LONG rc;
 
-	rc = RegOpenKeyExA(HKEY_CURRENT_USER, R2T_ADDIN_KEY, 0, KEY_READ, &key);
-	if (rc == ERROR_SUCCESS) {
-		rc = RegQueryValueExA(key, "LogFile", NULL, &type, (LPBYTE)path, &len);
-		RegCloseKey(key);
-	}
-
-	if ((rc == ERROR_SUCCESS) && (type == REG_SZ) && len && path[0]) {
-		path[sizeof(path)-1] = 0;
+	if (path) {
 		h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ|FILE_SHARE_WRITE,
 							 sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 		if (h != INVALID_HANDLE_VALUE) {
@@ -198,6 +262,9 @@ static DWORD WINAPI copy_thread(LPVOID unused)
 			break;
 		}
 
+		InterlockedIncrement(&vc.tx_events);
+		InterlockedExchangeAdd(&vc.tx_bytes, (LONG)r);
+
 		/* one write in flight at a time keeps ordering and bounds memory */
 		WaitForSingleObject(vc.write_complete, INFINITE);
 	}
@@ -212,6 +279,8 @@ static int start_helper(void)
 	STARTUPINFOA si;
 	HANDLE in_r = NULL, out_w = NULL, nul;
 	char cmdline[MAX_PATH+64];
+
+	vc.rx_events = vc.rx_bytes = vc.tx_events = vc.tx_bytes = 0;
 
 	if (helper_cmdline(cmdline, sizeof(cmdline))) {
 		vclog("cannot locate " R2T_HELPER_EXE);
@@ -289,6 +358,17 @@ static void stop_helper(void)
 		vc.copy_thread = NULL;
 	}
 
+	/* running is already 0: the heartbeat's own Sleep(3000)-bounded loop
+	 * notices and exits on its own within one tick */
+	if (vc.heartbeat_thread) {
+		WaitForSingleObject(vc.heartbeat_thread, 4000);
+		CloseHandle(vc.heartbeat_thread);
+		vc.heartbeat_thread = NULL;
+	}
+
+	vclog("session totals: rx=%ld events/%ldB, tx=%ld events/%ldB",
+			vc.rx_events, vc.rx_bytes, vc.tx_events, vc.tx_bytes);
+
 	/* only now that nobody reads from it */
 	if (vc.child_stdout_r) {
 		CloseHandle(vc.child_stdout_r);
@@ -341,8 +421,29 @@ static void data_received(LPVOID pData, UINT32 dataLength,
 		}
 	}
 
-	if (!WriteFile(vc.child_stdin_w, pData, dataLength, &w, NULL))
+	if (!WriteFile(vc.child_stdin_w, pData, dataLength, &w, NULL)) {
 		vclog("failed writing channel data: %lu", GetLastError());
+		return;
+	}
+
+	InterlockedIncrement(&vc.rx_events);
+	InterlockedExchangeAdd(&vc.rx_bytes, (LONG)dataLength);
+}
+
+/** every 3s while a session runs: prove which direction, if any, stalled */
+static DWORD WINAPI heartbeat_thread_proc(LPVOID unused)
+{
+	(void) unused;
+
+	while (vc.running) {
+		Sleep(3000);
+		if (!vc.running)
+			break;
+		vclog("heartbeat rx=%ld/%ldB tx=%ld/%ldB",
+				vc.rx_events, vc.rx_bytes, vc.tx_events, vc.tx_bytes);
+	}
+
+	return 0;
 }
 
 static VOID VCAPITYPE open_event(DWORD openHandle, UINT event, LPVOID pData,
@@ -401,7 +502,11 @@ static VOID VCAPITYPE init_event(LPVOID pInitHandle, UINT event,
 			if (!vc.copy_thread) {
 				vclog("CreateThread failed: %lu", GetLastError());
 				stop_helper();
+				break;
 			}
+
+			vc.heartbeat_thread =
+				CreateThread(NULL, 0, heartbeat_thread_proc, NULL, 0, NULL);
 			break;
 
 		case CHANNEL_EVENT_DISCONNECTED:
