@@ -57,8 +57,20 @@ static int pipe_create(HANDLE *pfd, int parent_fd)
 
 	pfd[0] = fd;
 
-	fd = CreateFileA(name, GENERIC_WRITE, 0, &sattr, 
-			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	/* FILE_FLAG_OVERLAPPED matters here: pipe_create() is called for both
+	 * directions of the child's I/O, and whichever end this handle becomes
+	 * (stdin write side or stdout read side) is the one aio_read()/aio_write()
+	 * drive with overlapped ReadFile/WriteFile calls, expecting
+	 * ERROR_IO_PENDING when the pipe's buffer is full. Without this flag,
+	 * Windows performs the I/O synchronously regardless of the OVERLAPPED
+	 * structure passed in -- which for the stdin write side means the
+	 * server's single-threaded main loop blocks inside WriteFile() the
+	 * moment a write doesn't fit in the pipe's buffer, freezing every
+	 * tunnel and the ping heartbeat along with it until the child drains
+	 * enough of its stdin. Small payloads never hit this; anything close to
+	 * or above the pipe's buffer size (NETBUF_MAX_SIZE/2 below) reliably does. */
+	fd = CreateFileA(name, GENERIC_WRITE, 0, &sattr,
+			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED, NULL);
 	if (fd == INVALID_HANDLE_VALUE) {
 		syserror("CreateFile");
 		CloseHandle(pfd[0]);
