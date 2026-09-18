@@ -329,6 +329,83 @@ int main(int argc, char **argv)
 		closesocket(t2);
 	}
 
+	/* --- 7c. reverse tunnel whose local connect-out is refused --------
+	 * Regression for a leak found live: every I/O-error close path in
+	 * main.c went through netsock_close() directly, which never told the
+	 * server -- only the explicit tunnel_close(ns,1) API did. A reverse
+	 * tunnel's local connect failing (the operator's own target refusing,
+	 * exactly what a throttled local proxy does) took that path, so the
+	 * server's tunnel_t lived forever, holding its id, until 255 of them
+	 * had piled up over one real session. */
+	{
+		unsigned char tid3, rid3, connans_ok[8];
+		unsigned char rconn[16];
+		int tries, saw_close = 0;
+
+		if (controller_cmd(
+				"r 127.0.0.1 59999 127.0.0.1 9999\n", reply, sizeof(reply)) <= 0)
+			fail("reverse tunnel add rejected");
+
+		/* client requests the bind */
+		n = read_frame(frame, sizeof(frame), 3000);
+		if ((n < 2) || (frame[0] != 0x04 /* R2TCMD_BIND */)) {
+			fail("expected R2TCMD_BIND, got %d bytes", n);
+			goto shutdown;
+		}
+		tid3 = frame[1];
+
+		/* answer as the server would: bound, IPv4, port/addr are
+		 * cosmetic here since nothing real is listening */
+		connans_ok[0] = 0x00; connans_ok[1] = TUNAF_IPV4;
+		connans_ok[2] = 0x27; connans_ok[3] = 0x0f;   /* port 9999 */
+		connans_ok[4] = 127; connans_ok[5] = 0;
+		connans_ok[6] = 0;   connans_ok[7] = 1;
+		if (send_msg(0x04 /* R2TCMD_BIND */, tid3, connans_ok, sizeof(connans_ok)))
+			fail("writing the bind answer");
+		Sleep(300);
+		ok("reverse tunnel 0x%02x bound", tid3);
+
+		/* simulate a peer connecting to our (bound) listener: rid is a
+		 * fresh id for this one accepted connection. addr/port here are
+		 * purely informational (the remote peer's address) -- the client
+		 * connects out to the lhost:lport from the "r" command above,
+		 * 127.0.0.1:1, which nothing answers on loopback */
+		rid3 = (tid3 == 0x00) ? 0x01 : 0x00;
+		rconn[0] = rid3; rconn[1] = TUNAF_IPV4;
+		rconn[2] = 0x30; rconn[3] = 0x39;             /* port 12345, cosmetic */
+		rconn[4] = 127; rconn[5] = 0; rconn[6] = 0; rconn[7] = 1;
+		if (send_msg(0x05 /* R2TCMD_RCONN */, tid3, rconn, 8))
+			fail("writing the RCONN frame");
+
+		for (tries = 0; tries < 30 && !saw_close; ++tries) {
+			/* keep the channel's own liveness timeout (30s+4s) from
+			 * expiring during this long a wait -- a spurious client-side
+			 * "disconnected" would tear the tunnel down via
+			 * tunnels_kill_clients() and confound the real scenario */
+			if ((tries % 6) == 0)
+				send_msg(R2TCMD_PING, 0, NULL, 0);
+
+			n = read_frame(frame, sizeof(frame), 3000);
+			if (n < 0) {
+				/* read_frame() returns -1 for a plain timeout too, not
+				 * only a dead pipe -- only give up early if the process
+				 * genuinely exited, otherwise keep polling */
+				if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0)
+					break;
+				continue;
+			}
+			if ((frame[0] == R2TCMD_CLOSE) && (frame[1] == rid3))
+				saw_close = 1;
+		}
+
+		if (saw_close)
+			ok("refused local connect-out still closes tunnel 0x%02x", rid3);
+		else
+			fail("tunnel 0x%02x leaked: refused connect-out was never reported", rid3);
+
+		controller_cmd("- 127.0.0.1 59999\n", reply, sizeof(reply));
+	}
+
 shutdown:
 	/* --- 8. the RDP client going away ------------------------------ */
 	CloseHandle(child_in_w);

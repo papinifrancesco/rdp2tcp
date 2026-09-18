@@ -228,6 +228,7 @@ static void mainloop(void)
 	DWORD ret;
 	unsigned int n;
 	long mask;
+	char host[NETADDRSTR_MAXSIZE];
 	int last_state, state, rd, wr, warned = 0;
 
 	last_state = 0;
@@ -324,6 +325,29 @@ static void mainloop(void)
 			 * data must not be forwarded before the tunnel is up. */
 			if (nev.lNetworkEvents & FD_CLOSE)
 				ns->peer_closed = 1;
+
+			/* FD_CONNECT firing only means the attempt finished, not that
+			 * it succeeded -- WSAEnumNetworkEvents() carries the real
+			 * outcome in iErrorCode[FD_CONNECT_BIT]. Nothing downstream
+			 * checks it: tunnel_write_event() unconditionally marks the
+			 * socket CONNECTED on any FD_WRITE|FD_CONNECT, then calls
+			 * netsock_write(ns,NULL,0), which -- with nothing queued yet
+			 * to send -- returns success without ever calling send() or
+			 * looking at the connection's real state. A refused connect
+			 * (exactly what a throttled local proxy produces) was marked
+			 * falsely "connected" and simply sat there forever: no more
+			 * events would ever fire for it, nothing would ever discover
+			 * it was dead, and the server's matching tunnel_t leaked
+			 * right alongside it. Handle the failure here, where the
+			 * error code is actually available, instead of downstream
+			 * where it no longer is. */
+			if ((nev.lNetworkEvents & FD_CONNECT) && nev.iErrorCode[FD_CONNECT_BIT]) {
+				error("failed to connect to %s (%s)",
+						netaddr_print(&ns->addr, host),
+						net_syserror(nev.iErrorCode[FD_CONNECT_BIT]));
+				netsock_close(ns);
+				continue;
+			}
 
 			rd = ((nev.lNetworkEvents & (FD_READ|FD_ACCEPT)) || ns->peer_closed)
 				  && netsock_want_read(ns);

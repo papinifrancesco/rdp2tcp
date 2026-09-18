@@ -242,8 +242,12 @@ void tunnel_close(netsock_t *ns, int notify_server)
 	trace_tun("tid=0x%02x, notify=%i", tid, notify_server);
 
 	if (tid != 0xff) {
-		if (notify_server)
+		if (notify_server) {
 			channel_close_tunnel(tid);
+			/* already notified -- netsock_close() must not do it again
+			 * when the main loop reaps this cancelled socket */
+			ns->tid = 0xff;
+		}
 
 		if (tid == last_tid)
 			--last_tid;

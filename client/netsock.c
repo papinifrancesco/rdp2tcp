@@ -81,6 +81,24 @@ void netsock_close(netsock_t *ns)
 {
 	assert(ns && (((ns->type == NETSOCK_UNDEF) || valid_netsock(ns))));
 
+	/* Every path that closes a tunnel-carrying socket ends up here sooner
+	 * or later -- tunnel_close(ns,1) cancels it and leaves the main loop to
+	 * reap it on the next pass, and every I/O-error path in main.c closes
+	 * it directly, without going through tunnel_close() at all. Only the
+	 * former notifies the server (channel_close_tunnel()); the latter
+	 * never did, for any of TUNCLI/RTUNCLI/S5CLI, on any error -- a
+	 * connection refused, reset, or any failed read/write just vanished
+	 * locally while the server's matching tunnel_t sat there forever,
+	 * holding its id. Catching it here, once, closes every one of those
+	 * paths at once instead of chasing each call site.
+	 *
+	 * tunnel_close() already notifies explicitly when it has a reason
+	 * to say (deliberate removal, a protocol error); it resets ns->tid to
+	 * 0xff right after, so this doesn't fire a second time for those. */
+	if (((ns->type == NETSOCK_TUNCLI) || (ns->type == NETSOCK_RTUNCLI)
+			|| (ns->type == NETSOCK_S5CLI)) && (ns->tid != 0xff))
+		channel_close_tunnel(ns->tid);
+
 	list_del(&ns->list);
 
 	if (!netsock_is_sockless(ns))
@@ -93,6 +111,7 @@ void netsock_close(netsock_t *ns)
 			break;
 
 		case NETSOCK_TUNCLI:
+		case NETSOCK_RTUNCLI:
 			iobuf_kill(&ns->u.tuncli.obuf);
 			break;
 
@@ -229,8 +248,29 @@ netsock_t *netsock_connect(const char *host, unsigned short port)
 	}
 
 	cli = netsock_alloc(NULL, &sock, &addr, 0);
-	if (cli)
+	if (cli) {
 		cli->state = (ret ? NETSTATE_CONNECTING : NETSTATE_CONNECTED);
+#ifdef _WIN32
+		/* net_client() already armed WSAEventSelect on this exact socket --
+		 * FD_CONNECT|FD_CLOSE if the connect is still pending, FD_READ|
+		 * FD_CLOSE if it completed synchronously (see netres() in
+		 * common/nethelper.c). ns->evt_mask starts at 0 from calloc(), so
+		 * without this the main loop's cached-mask check in mainloop()
+		 * sees 0 != the mask it independently computes and re-arms with
+		 * WSAEventSelect a second time on its very first pass over this
+		 * socket. Re-arming resets the event and clears any already-
+		 * pending network-event record -- and on loopback, a refused
+		 * connection can complete in well under a millisecond, easily
+		 * inside the gap between this call and that first pass. The
+		 * FD_CONNECT completion is then simply gone: nothing ever
+		 * signals the socket again, its tunnel_t never gets torn down
+		 * from a failure that no one ever finds out happened. Setting
+		 * evt_mask here to match what's really armed makes the main
+		 * loop's first look see no change needed and skip the re-arm
+		 * entirely, closing the gap instead of racing it. */
+		cli->evt_mask = ret ? (FD_CONNECT|FD_CLOSE) : (FD_READ|FD_CLOSE);
+#endif
+	}
 
 	return cli;
 }
